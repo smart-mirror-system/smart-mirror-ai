@@ -1,7 +1,6 @@
 {
   "exercises": {
     "squat": {
-      "name_zh": "深蹲",
       "name_en": "Squat",
       "down_angle": 110,
       "up_angle": 160,
@@ -13,7 +12,6 @@
       "angle_point": [12, 14, 16]
     },
     "pushup": {
-      "name_zh": "俯卧撑",
       "name_en": "Push-up",
       "down_angle": 110,
       "up_angle": 160,
@@ -25,7 +23,6 @@
       "angle_point": [6, 8, 10]
     },
     "situp": {
-      "name_zh": "仰卧起坐",
       "name_en": "Sit-up",
       "down_angle": 145,
       "up_angle": 170,
@@ -37,7 +34,6 @@
       "angle_point": [5, 11, 12]
     },
     "bicep_curl": {
-      "name_zh": "弯举",
       "name_en": "Bicep Curl",
       "down_angle": 160,
       "up_angle": 60,
@@ -49,7 +45,6 @@
       "angle_point": [6, 8, 10]
     },
     "lateral_raise": {
-      "name_zh": "侧平举",
       "name_en": "Lateral Raise",
       "down_angle": 30,
       "up_angle": 80,
@@ -61,7 +56,6 @@
       "angle_point": [12, 6, 8]
     },
     "overhead_press": {
-      "name_zh": "推举",
       "name_en": "Overhead Press",
       "down_angle": 30,
       "up_angle": 150,
@@ -73,7 +67,6 @@
       "angle_point": [12, 6, 8]
     },
     "leg_raise": {
-      "name_zh": "抬腿",
       "name_en": "Leg Raise",
       "down_angle": 130,
       "up_angle": 160,
@@ -85,7 +78,6 @@
       "angle_point": [12, 14, 16]
     },
     "knee_raise": {
-      "name_zh": "抬膝",
       "name_en": "Knee Raise",
       "down_angle": 110,
       "up_angle": 160,
@@ -97,7 +89,6 @@
       "angle_point": [12, 14, 16]
     },
     "knee_press": {
-      "name_zh": "压膝",
       "name_en": "Knee Press",
       "down_angle": 110,
       "up_angle": 160,
@@ -109,7 +100,6 @@
       "angle_point": [11, 13, 15]
     },
     "crunch": {
-      "name_zh": "卷腹",
       "name_en": "Crunch",
       "down_angle": 150,
       "up_angle": 175,
