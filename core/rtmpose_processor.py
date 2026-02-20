@@ -14,7 +14,7 @@ class RTMPoseProcessor:
         self.conf_threshold = 0.5
         self.device = device
         self.backend = backend
-        
+        self.wholebody = None
         # Initialize RTMPose model
         self.init_rtmpose(mode)
         
@@ -71,6 +71,9 @@ class RTMPoseProcessor:
                     return
                 else:
                     print("Local model files incomplete, using online download")
+                    self.wholebody = Wholebody(mode=mode, backend=self.backend, device=self.device)
+                    print("RTMPose online model initialization successful")
+                    return
             else:
                 print("models directory doesn't exist, using online download")
                 self.wholebody = Wholebody(
@@ -81,8 +84,8 @@ class RTMPoseProcessor:
                 print("RTMPose online model initialization successful")
             
         except Exception as e:
-            print(f"RTMPose initialization failed: {e}")
-
+            raise RuntimeError(f"RTMPose initialization failed: {e}")
+    
     def get_keypoint_mapping(self):
         """Get keypoint mapping (COCO 17 keypoint format)"""
         # RTMPose and YOLO both use COCO 17 keypoint format, same order
@@ -162,6 +165,10 @@ class RTMPoseProcessor:
         keypoints = None
         
         try:
+            if self.wholebody is None:
+                # Model not initialized
+                return None, None, None, None
+
             # Use RTMPose for pose detection
             detected_keypoints, scores = self.wholebody(frame)
             
