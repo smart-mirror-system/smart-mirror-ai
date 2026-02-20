@@ -1,0 +1,32 @@
+on:
+    push:
+        branches: ["main", "devops"]
+    pull_request:
+        branches: ["main", "devops"]
+
+jobs:
+    docker-build:
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v6.0.2
+
+            - name: Docker Login
+              uses: docker/login-action@v3.7.0
+              with:
+                username: ${{ secrets.DOCKERHUB_USERNAME }}
+                password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+            - name: Docker Build
+              run: |
+                docker build -t ${{ secrets.DOCKERHUB_USERNAME }}/smart-mirror-ai:latest .
+
+            - name: Docker Tag
+              run: |
+                docker tag ${{ secrets.DOCKERHUB_USERNAME }}/smart-mirror-ai:latest \
+                ${{ secrets.DOCKERHUB_USERNAME }}/smart-mirror-ai:${{ github.sha }}
+
+            - name: Docker Push
+              run: |
+                docker push ${{ secrets.DOCKERHUB_USERNAME }}/smart-mirror-ai:latest
+                docker push ${{ secrets.DOCKERHUB_USERNAME }}/smart-mirror-ai:${{ github.sha }}
