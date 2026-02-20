@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+venv/
+.env
+gym_env/
+ai-venv/
+
+# Model files
+models/
+*.onnx
+*.pth
+*.pt
+
+# Debug JSON
+live_stream_data.json
+
+# VSCode
+.vscode/
+
+# Anaconda
+.env/
