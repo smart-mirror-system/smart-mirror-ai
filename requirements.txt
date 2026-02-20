@@ -1,8 +1,7 @@
-fastapi
-uvicorn
-python-multipart
 opencv-python
 numpy
 rtmlib
 onnxruntime
-websockets
+python-socketio[client]
+PyJWT
+python-dotenv
