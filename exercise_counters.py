@@ -146,13 +146,14 @@ class ExerciseCounter:
     
     def export_live_data(self, exercise_type, keypoints):
         """
-        Export real-time exercise data to JSON file for backend streaming.
+        Export real-time exercise data to JSON file for debugging.
         
         Args:
             exercise_type: Name of the exercise being performed
             keypoints: NumPy array of keypoints detected by RTMPose
         """
-        pass
+        if os.getenv("EXPORT_JSON", "0") != "1":
+            return
         try:
             # Convert NumPy arrays to standard Python lists for JSON serialization
             if isinstance(keypoints, np.ndarray):
@@ -246,16 +247,27 @@ class ExerciseCounter:
             up_threshold = config['up_angle']
             down_threshold = config['down_angle']
             
-            # Counting logic with timing check
-            if smoothed_angle > up_threshold:
-                self.stage = "up"
-            elif (smoothed_angle < down_threshold and 
-                  self.stage == "up" and 
-                  self.check_rep_timing()):
-                
-                self.stage = "down"
-                self.counter += 1
-                self.last_count_time = time.time()
+            # Detect direction automatically
+            if up_threshold > down_threshold:
+                # Big angle = up (e.g., squat)
+                if smoothed_angle > up_threshold:
+                    self.stage = "up"
+                elif (smoothed_angle < down_threshold and
+                    self.stage == "up" and
+                    self.check_rep_timing()):
+                    self.stage = "down"
+                    self.counter += 1
+                    self.last_count_time = time.time()
+            else:
+                # Small angle = up (e.g., bicep curl)
+                if smoothed_angle < up_threshold:
+                    self.stage = "up"
+                elif (smoothed_angle > down_threshold and
+                    self.stage == "up" and
+                    self.check_rep_timing()):
+                    self.stage = "down"
+                    self.counter += 1
+                    self.last_count_time = time.time()
             
             # Export live data for every frame
             self.export_live_data(exercise_type, keypoints)
