@@ -1,0 +1,28 @@
+on:
+  push:
+    branches: ["main", "devops"]
+  pull_request:
+    branches: ["main", "devops"]
+
+jobs:
+  lint:
+    uses: ./.github/workflows/lint.yaml
+
+  codeql-security-analysis:
+    name: Security Analysis
+    uses: ./.github/workflows/codeql-security-analysis.yaml
+    secrets: inherit
+    permissions:
+      security-events: write
+      packages: read
+
+  docker:
+    needs: codeql-security-analysis
+    name: Docker
+    uses: ./.github/workflows/docker.yaml
+    secrets: inherit
+
+  notify_team:
+    needs: docker
+    uses: ./.github/workflows/notify.yaml
+    secrets: inherit
