@@ -1,8 +1,7 @@
 on:
   push:
-    branches: ["main", "devops"]
-  pull_request:
-    branches: ["main", "devops"]
+    branches: ["main"]
+  workflow_dispatch: 
 
 jobs:
   lint:
