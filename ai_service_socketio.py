@@ -1,37 +1,65 @@
-# ai_service_socketio.py
-# Headless AI service: camera -> pose -> count -> Socket.IO backend
-
 import os
 import time
+import json
 import cv2
-import jwt  # PyJWT
+import jwt
 import socketio
 
+from dotenv import load_dotenv
 from exercise_counters import ExerciseCounter
 from core.rtmpose_processor import RTMPoseProcessor
-from dotenv import load_dotenv
-load_dotenv()
 
+load_dotenv(override=True)
+print("[DEBUG] RUN_MODE env =", os.getenv("RUN_MODE"))
 # =========================
 # Config (env first, then defaults)
 # =========================
-BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:3000")
+RUN_MODE = os.getenv("RUN_MODE", "socketio").strip().lower()  # socketio | standalone
+
+BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:3000").strip()
+
+DEVICE_TOKEN = os.getenv("DEVICE_TOKEN", "").strip()
+
+# Legacy fallback for current dev flow (user JWT from /api/auth/login)
 AI_JWT = os.getenv("AI_JWT", "").strip()
-EXERCISE_TYPE = os.getenv("EXERCISE_TYPE", "pushup").strip()
+
+# A token is required only in socketio mode
+TOKEN = os.getenv("DEVICE_TOKEN", "").strip()
+if not TOKEN:
+    raise SystemExit("Missing DEVICE_TOKEN (device JWT).")
+
+EXERCISE_TYPE = os.getenv("EXERCISE_TYPE", "pushup").strip()  # used as default / standalone
 CAMERA_INDEX = int(os.getenv("CAMERA_INDEX", "0"))
 SEND_EVERY_MS = int(os.getenv("SEND_EVERY_MS", "250"))  # throttle updates
-MODEL_MODE = os.getenv("MODEL_MODE", "lightweight") 
+MODEL_MODE = os.getenv("MODEL_MODE", "lightweight").strip()  # lightweight / balanced / performance
+
 SHOW_CAMERA = os.getenv("SHOW_CAMERA", "0") == "1"
 
-if not AI_JWT:
-    raise SystemExit("Missing AI_JWT env var (use the token from /api/auth/login).")
+# Optional debug export (legacy JSON streaming / debugging)
+EXPORT_JSON = os.getenv("EXPORT_JSON", "0") == "1"
+EXPORT_JSON_PATH = os.getenv("EXPORT_JSON_PATH", "live_stream_data.json").strip()
 
-# Decode userId from JWT payload WITHOUT verifying signature (server will verify anyway).
-# This is only to send the required userId for room:join / ai:progress due to current backend contract.
-payload = jwt.decode(AI_JWT, options={"verify_signature": False})
-USER_ID = str(payload.get("userId") or payload.get("id") or payload.get("_id") or "")
-if not USER_ID:
-    raise SystemExit("JWT payload does not contain userId/id/_id.")
+if RUN_MODE not in ("socketio", "standalone"):
+    raise SystemExit("RUN_MODE must be 'socketio' or 'standalone'")
+
+if RUN_MODE == "socketio" and not TOKEN:
+    raise SystemExit("Missing DEVICE_TOKEN (recommended) or AI_JWT (dev fallback) for socketio mode.")
+
+# Decode token payload WITHOUT verifying signature (for logs only).
+# Server will do real verification.
+ID_HINT = "unknown"
+if TOKEN:
+    try:
+        p = jwt.decode(TOKEN, options={"verify_signature": False})
+        ID_HINT = str(
+            p.get("deviceId")
+            or p.get("userId")
+            or p.get("id")
+            or p.get("_id")
+            or "unknown"
+        )
+    except Exception:
+        pass
 
 # =========================
 # Socket.IO client
@@ -44,122 +72,228 @@ sio = socketio.Client(
     engineio_logger=False,
 )
 
+# Runtime state controlled by backend commands
+current_user_id = None
+current_exercise = EXERCISE_TYPE
+running = False
+cap = None
+
+
 @sio.event
 def connect():
-    print("[AI] Connected to backend:", BACKEND_URL)
-    # Current backend expects room:join with userId (it re-checks against token).
-    sio.emit("room:join", {"userId": USER_ID})
-    print("[AI] Joined room for user:", USER_ID)
+    print(f"[AI] Connected to backend: {BACKEND_URL} (id_hint={ID_HINT})")
+
 
 @sio.event
 def connect_error(data):
     print("[AI] connect_error:", data)
 
+
 @sio.event
 def disconnect():
     print("[AI] Disconnected")
 
+
+@sio.on("workout:start")
+def on_start(data):
+    global current_user_id, current_exercise, running
+    current_user_id = str(data.get("userId"))
+    current_exercise = str(data.get("exerciseType") or EXERCISE_TYPE)
+    # Reset will happen in main loop when starting
+    running = True
+    print(f"[AI] workout:start user={current_user_id} ex={current_exercise}")
+
+@sio.on("workout:stop")
+def on_stop(data):
+    global running
+    running = False
+    print(f"[AI] workout:stop user={data.get('userId')}")
+
+
 def safe_form_score(angle):
     """
-    Simple placeholder form score (0-100). Real scoring can be added later.
+    Placeholder form score (0-100).
+    Replace later with real quality metrics.
     """
     if angle is None:
         return 0
-    # A naive heuristic: closer to mid-range is better (just for demo).
-    # You can replace with real CV quality metrics later.
     return max(10, min(100, int(100 - abs(angle - 120) * 0.5)))
 
+
+def export_debug_json(payload: dict):
+    """
+    Optional JSON export for debugging only.
+    Controlled by EXPORT_JSON=1.
+    """
+    if not EXPORT_JSON:
+        return
+    try:
+        with open(EXPORT_JSON_PATH, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print("[AI] export_debug_json failed:", e)
+
+
+def reset_counter(counter: ExerciseCounter):
+    """
+    Reset counter safely without depending on specific class implementation.
+    """
+    if hasattr(counter, "reset") and callable(getattr(counter, "reset")):
+        try:
+            counter.reset()
+            return
+        except Exception:
+            pass
+
+    # Fallback reset
+    try:
+        counter.counter = 0
+    except Exception:
+        pass
+    try:
+        counter.stage = None
+    except Exception:
+        pass
+
+
 def main():
-    # 1) Init counter + pose processor (same components used in main.py microservice)
+    global running
+
+    # 1) Init counter + pose processor
     counter = ExerciseCounter()
     processor = RTMPoseProcessor(exercise_counter=counter, mode=MODEL_MODE)
 
-    # 2) Connect to backend with auth token (same as your mock-ai.js logic)
-    sio.connect(
-        BACKEND_URL,
-        transports=["websocket"],
-        auth={"token": AI_JWT},
-    )
+    # 2) Connect to backend (socketio mode only)
+    if RUN_MODE == "socketio":
+        try:
+            sio.connect(
+                BACKEND_URL,
+                transports=["websocket"],
+                auth={"token": TOKEN},
+            )
+        except Exception as e:
+            print("[AI] Could not connect to backend:", e)
+            raise SystemExit("Backend is not running or BACKEND_URL is wrong.")
+    else:
+        print("[AI] Standalone mode (no backend).")
+        running = True  # start immediately in standalone
 
-    # 3) Open camera (headless - no cv2.imshow
+    # 3) Open camera
     cap = cv2.VideoCapture(CAMERA_INDEX)
-
     if not cap.isOpened():
         raise SystemExit("Could not open camera. Check CAMERA_INDEX or camera permissions.")
-    last_sent_ms = 0
-    last_reps = -1
 
-    print(f"[AI] Running headless. exercise={EXERCISE_TYPE}, camera={CAMERA_INDEX}")
+    last_sent_ms = 0
+    last_reps_sent = -1
+    last_printed_reps = -1
+
+    print(f"[AI] Ready. mode={RUN_MODE}, default_ex={EXERCISE_TYPE}, camera={CAMERA_INDEX}, show_camera={SHOW_CAMERA}")
+
     try:
         while True:
+            # In socketio mode, wait for workout:start
+            if not running:
+                time.sleep(0.05)
+                continue
+
+            # When a workout starts, reset counter once at the beginning
+            # (simple way: detect transition by using last_reps_sent == -1)
+            if last_reps_sent == -1:
+                reset_counter(counter)
+
             ok, frame = cap.read()
             if not ok:
                 continue
-        
-            # Optional: resize for speed
+
+            # Optional resize for speed
             frame = cv2.resize(frame, (320, 240))
 
-            # process_frame updates
-            _, angle, _, keypoints = processor.process_frame(frame, EXERCISE_TYPE)
+            exercise = current_exercise or EXERCISE_TYPE
 
-            reps = int(counter.counter)
-            stage = counter.stage if counter.stage is not None else "unknown"
+            # Process pose
+            # Returns: (annotated_frame?, angle, stage?, keypoints)
+            _img, angle, _unused, _keypoints = processor.process_frame(frame, exercise)
+
+            reps = int(getattr(counter, "counter", 0))
+            stage = getattr(counter, "stage", None) or "unknown"
 
             # ===== optional debug window =====
             if SHOW_CAMERA:
-                # Small overlay for debugging
-                cv2.putText(frame, f"EX: {EXERCISE_TYPE}", (10, 25),
+                cv2.putText(frame, f"EX: {exercise}", (10, 25),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
                 cv2.putText(frame, f"Reps: {reps}", (10, 55),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                 cv2.putText(frame, f"Stage: {stage}", (10, 85),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                
+
                 cv2.imshow("AI Debug Camera", frame)
-                
-                # Press 'q' to stop debug window (optional)
+                # Press 'q' to stop current workout (does not exit program)
                 if cv2.waitKey(1) & 0xFF == ord("q"):
-                    break
+                    running = False
+                    # reset for next session
+                    last_reps_sent = -1
+                    continue
 
             now_ms = int(time.time() * 1000)
 
-            # Send when reps changed OR periodically (throttled)
-            should_send = (reps != last_reps) or (now_ms - last_sent_ms >= SEND_EVERY_MS)
+            should_send = (reps != last_reps_sent) or (now_ms - last_sent_ms >= SEND_EVERY_MS)
             if should_send:
                 last_sent_ms = now_ms
-                last_reps = reps
+                last_reps_sent = reps
 
+            if running and current_user_id:
                 payload = {
-                    "userId": USER_ID,
-                    "exerciseType": EXERCISE_TYPE,
+                    "userId": current_user_id,
+                    "exerciseType": current_exercise,
                     "reps": reps,
                     "stage": stage,
                     "angle": float(angle) if angle is not None else 0,
                     "formScore": safe_form_score(angle),
-                    "mistakes": [],  # TODO: add real mistakes later
+                    "mistakes": [],
                     "ts": now_ms,
-                    # Optional: send skeleton coords (can be heavy)
-                    # "skeleton": keypoints.tolist() if keypoints is not None else [],
                 }
+                sio.emit("ai:progress", payload)
 
-                if sio.connected:
-                    try:
-                        sio.emit("ai:progress", payload)
-                    except Exception as e:
-                        print("[AI] emit failed:", e)
+                # Optional local debug export
+                export_debug_json(payload)
+
+                if RUN_MODE == "socketio":
+                    if sio.connected:
+                        try:
+                            sio.emit("ai:progress", payload)
+                        except Exception as e:
+                            print("[AI] emit failed:", e)
+                    # if disconnected, just skip sending
                 else:
-                    print("[AI] Not connected, skipping emit")
+                    # standalone: print on rep change
+                    if reps != last_printed_reps:
+                        last_printed_reps = reps
+                        print(f"[AI] {exercise}: reps={reps}, stage={stage}, score={payload['formScore']}")
+
+            # If workout stopped by backend, reset session markers
+            if not running:
+                last_reps_sent = -1
 
     except KeyboardInterrupt:
         print("\n[AI] Stopping...")
     finally:
         if SHOW_CAMERA:
-            cv2.destroyAllWindows()
-        cap.release()
+            try:
+                cv2.destroyAllWindows()
+            except Exception:
+                pass
+
         try:
-            sio.disconnect()
+            cap.release()
         except Exception:
             pass
+
+        if RUN_MODE == "socketio":
+            try:
+                sio.disconnect()
+            except Exception:
+                pass
+
 
 if __name__ == "__main__":
     main()
