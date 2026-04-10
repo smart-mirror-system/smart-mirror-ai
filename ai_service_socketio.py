@@ -15,15 +15,7 @@ print("[DEBUG] RUN_MODE env =", os.getenv("RUN_MODE"))
 # Config (env first, then defaults)
 # =========================
 RUN_MODE = os.getenv("RUN_MODE", "socketio").strip().lower()  # socketio | standalone
-
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:3000").strip()
-
-DEVICE_TOKEN = os.getenv("DEVICE_TOKEN", "").strip()
-
-# Legacy fallback for current dev flow (user JWT from /api/auth/login)
-# AI_JWT = os.getenv("AI_JWT", "").strip()
-
-# A token is required only in socketio mode
 TOKEN = os.getenv("DEVICE_TOKEN", "").strip()
 if not TOKEN:
     raise SystemExit("Missing DEVICE_TOKEN (device JWT).")
@@ -32,9 +24,7 @@ EXERCISE_TYPE = os.getenv("EXERCISE_TYPE", "pushup").strip()  # used as default 
 CAMERA_INDEX = int(os.getenv("CAMERA_INDEX", "0"))
 SEND_EVERY_MS = int(os.getenv("SEND_EVERY_MS", "250"))  # throttle updates
 MODEL_MODE = os.getenv("MODEL_MODE", "lightweight").strip()  # lightweight / balanced / performance
-
 SHOW_CAMERA = os.getenv("SHOW_CAMERA", "0") == "1"
-
 # Optional debug export (legacy JSON streaming / debugging)
 EXPORT_JSON = os.getenv("EXPORT_JSON", "0") == "1"
 EXPORT_JSON_PATH = os.getenv("EXPORT_JSON_PATH", "live_stream_data.json").strip()
@@ -77,6 +67,7 @@ current_user_id = None
 current_exercise = EXERCISE_TYPE
 running = False
 cap = None
+destroy_window_requested = False
 
 
 @sio.event
@@ -105,8 +96,10 @@ def on_start(data):
 
 @sio.on("workout:stop")
 def on_stop(data):
-    global running
+    global running, destroy_window_requested
     running = False
+    if SHOW_CAMERA:
+        destroy_window_requested = True
     print(f"[AI] workout:stop user={data.get('userId')}")
 
 
@@ -138,23 +131,28 @@ def reset_counter(counter: ExerciseCounter):
     """
     Reset counter safely without depending on specific class implementation.
     """
-    if hasattr(counter, "reset") and callable(getattr(counter, "reset")):
+    if hasattr(counter, "reset_counter") and callable(getattr(counter, "reset_counter")):
         try:
-            counter.reset()
+            counter.reset_counter()
             return
         except Exception:
             pass
-
-    # Fallback reset
     try:
         counter.counter = 0
-    except Exception:
-        pass
-    try:
         counter.stage = None
+        counter.angle_history.clear()
+        counter.leg_stages = {'left': None, 'right': None}
     except Exception:
         pass
 
+def handle_destroy_window():
+    global destroy_window_requested
+    if destroy_window_requested and SHOW_CAMERA:
+        try:
+            cv2.destroyAllWindows()
+        except Exception:
+            pass
+        destroy_window_requested = False
 
 def main():
     global running
@@ -191,8 +189,8 @@ def main():
 
     try:
         while True:
-            # In socketio mode, wait for workout:start
             if not running:
+                handle_destroy_window()  # main thread يقفل الـ window لو في طلب
                 time.sleep(0.05)
                 continue
 
@@ -237,11 +235,11 @@ def main():
             now_ms = int(time.time() * 1000)
 
             should_send = (reps != last_reps_sent) or (now_ms - last_sent_ms >= SEND_EVERY_MS)
-            if should_send:
+
+            if running and current_user_id and should_send:
                 last_sent_ms = now_ms
                 last_reps_sent = reps
 
-            if running and current_user_id:
                 payload = {
                     "userId": current_user_id,
                     "exerciseType": current_exercise,
@@ -270,6 +268,7 @@ def main():
             # If workout stopped by backend, reset session markers
             if not running:
                 last_reps_sent = -1
+                handle_destroy_window()
 
     except KeyboardInterrupt:
         print("\n[AI] Stopping...")
@@ -290,7 +289,6 @@ def main():
                 sio.disconnect()
             except Exception:
                 pass
-
 
 if __name__ == "__main__":
     main()
