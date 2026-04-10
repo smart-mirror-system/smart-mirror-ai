@@ -21,7 +21,7 @@ BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:3000").strip()
 DEVICE_TOKEN = os.getenv("DEVICE_TOKEN", "").strip()
 
 # Legacy fallback for current dev flow (user JWT from /api/auth/login)
-AI_JWT = os.getenv("AI_JWT", "").strip()
+# AI_JWT = os.getenv("AI_JWT", "").strip()
 
 # A token is required only in socketio mode
 TOKEN = os.getenv("DEVICE_TOKEN", "").strip()
@@ -252,18 +252,15 @@ def main():
                     "mistakes": [],
                     "ts": now_ms,
                 }
-                sio.emit("ai:progress", payload)
 
                 # Optional local debug export
                 export_debug_json(payload)
 
-                if RUN_MODE == "socketio":
-                    if sio.connected:
-                        try:
-                            sio.emit("ai:progress", payload)
-                        except Exception as e:
-                            print("[AI] emit failed:", e)
-                    # if disconnected, just skip sending
+                if RUN_MODE == "socketio" and sio.connected:
+                    try:
+                        sio.emit("ai:progress", payload)
+                    except Exception as e:
+                        print("[AI] emit failed:", e)
                 else:
                     # standalone: print on rep change
                     if reps != last_printed_reps:
