@@ -23,8 +23,3 @@ jobs:
     name: Docker
     uses: ./.github/workflows/docker.yaml
     secrets: inherit
-
-  notify_team:
-    needs: docker
-    uses: ./.github/workflows/notify.yaml
-    secrets: inherit
