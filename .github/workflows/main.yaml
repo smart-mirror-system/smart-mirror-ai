@@ -1,7 +1,10 @@
 on:
   push:
+    workflow_dispatch:
     branches: ["main"]
-  workflow_dispatch: 
+    tags: ["**"]
+  pull_request:
+    branches: ["main"]
 
 jobs:
   lint:
