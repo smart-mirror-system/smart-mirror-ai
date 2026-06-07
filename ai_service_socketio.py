@@ -276,8 +276,9 @@ def main():
                         print("[AI Debug] Stop detection error:", e)
                         stop_signal_start_time = None
                 else:
-                        # During the first 5 seconds, the timer is ignored and cannot trigger
-                                        
+                    # During the first 5 seconds, the timer is ignored and cannot trigger
+                    stop_signal_start_time = None
+                
                 # Send reps data to the backend via socket
                 now_ms = int(time.time() * 1000)
                 should_send = (reps != last_reps_sent) or (now_ms - last_sent_ms >= SEND_EVERY_MS)
