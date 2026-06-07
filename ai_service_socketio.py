@@ -2,52 +2,46 @@ import os
 import time
 import json
 import cv2
+from numpy import angle
 import jwt
 import socketio
+import math
+import pyautogui
 
 from dotenv import load_dotenv
 from exercise_counters import ExerciseCounter
 from core.rtmpose_processor import RTMPoseProcessor
+import mediapipe as mp  # Compatible with stable release 0.10.9
 
 load_dotenv(override=True)
 print("[DEBUG] RUN_MODE env =", os.getenv("RUN_MODE"))
+
 # =========================
-# Config (env first, then defaults)
+# Config
 # =========================
-RUN_MODE = os.getenv("RUN_MODE", "socketio").strip().lower()  # socketio | standalone
+RUN_MODE = os.getenv("RUN_MODE", "socketio").strip().lower()
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:3000").strip()
 TOKEN = os.getenv("DEVICE_TOKEN", "").strip()
 if not TOKEN:
     raise SystemExit("Missing DEVICE_TOKEN (device JWT).")
 
-EXERCISE_TYPE = os.getenv("EXERCISE_TYPE", "pushup").strip()  # used as default / standalone
+EXERCISE_TYPE = os.getenv("EXERCISE_TYPE", "pushup").strip()
 CAMERA_INDEX = int(os.getenv("CAMERA_INDEX", "0"))
-SEND_EVERY_MS = int(os.getenv("SEND_EVERY_MS", "250"))  # throttle updates
-MODEL_MODE = os.getenv("MODEL_MODE", "lightweight").strip()  # lightweight / balanced / performance
-SHOW_CAMERA = os.getenv("SHOW_CAMERA", "0") == "1"
-# Optional debug export (legacy JSON streaming / debugging)
+SEND_EVERY_MS = int(os.getenv("SEND_EVERY_MS", "250"))
+MODEL_MODE = os.getenv("MODEL_MODE", "lightweight").strip()
+SHOW_CAMERA = os.getenv("SHOW_CAMERA", "1") == "1"  # Keep it 1 by default for a clear visual test
 EXPORT_JSON = os.getenv("EXPORT_JSON", "0") == "1"
 EXPORT_JSON_PATH = os.getenv("EXPORT_JSON_PATH", "live_stream_data.json").strip()
 
 if RUN_MODE not in ("socketio", "standalone"):
     raise SystemExit("RUN_MODE must be 'socketio' or 'standalone'")
 
-if RUN_MODE == "socketio" and not TOKEN:
-    raise SystemExit("Missing DEVICE_TOKEN (recommended) or AI_JWT (dev fallback) for socketio mode.")
-
-# Decode token payload WITHOUT verifying signature (for logs only).
-# Server will do real verification.
+# Decode the token for debugging
 ID_HINT = "unknown"
 if TOKEN:
     try:
         p = jwt.decode(TOKEN, options={"verify_signature": False})
-        ID_HINT = str(
-            p.get("deviceId")
-            or p.get("userId")
-            or p.get("id")
-            or p.get("_id")
-            or "unknown"
-        )
+        ID_HINT = str(p.get("deviceId") or p.get("userId") or p.get("id") or p.get("_id") or "unknown")
     except Exception:
         pass
 
@@ -62,233 +56,273 @@ sio = socketio.Client(
     engineio_logger=False,
 )
 
-# Runtime state controlled by backend commands
-current_user_id = None
+# Runtime state
+current_user_id = "standalone_user"  # Default value so the code runs even without a backend in standalone mode
 current_exercise = EXERCISE_TYPE
-running = False
 cap = None
 destroy_window_requested = False
 
+# 🚨 New magic variable to manage gestures and automatic navigation:
+# 0 = Navigation Mode (Hand Mouse code active and workouts stopped)
+# 1 = Workout Mode (mouse disabled, RTMPose code counts, waiting for stop signal)
+CURRENT_MODE = 0 
+
+# Stop gesture hold time calculations
+stop_signal_start_time = None
+frame_reduction = 80
+screen_width, screen_height = pyautogui.size()
 
 @sio.event
 def connect():
     print(f"[AI] Connected to backend: {BACKEND_URL} (id_hint={ID_HINT})")
 
-
 @sio.event
 def connect_error(data):
     print("[AI] connect_error:", data)
-
 
 @sio.event
 def disconnect():
     print("[AI] Disconnected")
 
-
+# Backend can also change the mode if an admin uses the control panel without the screen
 @sio.on("workout:start")
 def on_start(data):
-    global current_user_id, current_exercise, running
+    global current_user_id, current_exercise, CURRENT_MODE
     current_user_id = str(data.get("userId"))
     current_exercise = str(data.get("exerciseType") or EXERCISE_TYPE)
-    # Reset will happen in main loop when starting
-    running = True
-    print(f"[AI] workout:start user={current_user_id} ex={current_exercise}")
+    CURRENT_MODE = 1
+    print(f"[AI] Backend triggered workout:start user={current_user_id} ex={current_exercise}")
 
 @sio.on("workout:stop")
 def on_stop(data):
-    global running, destroy_window_requested
-    running = False
+    global CURRENT_MODE, destroy_window_requested
+    CURRENT_MODE = 0
     if SHOW_CAMERA:
         destroy_window_requested = True
-    print(f"[AI] workout:stop user={data.get('userId')}")
+    print(f"[AI] Backend triggered workout:stop")
 
 
 def safe_form_score(angle):
-    """
-    Placeholder form score (0-100).
-    Replace later with real quality metrics.
-    """
-    if angle is None:
+    if angle is None or math.isnan(angle):
         return 0
     return max(10, min(100, int(100 - abs(angle - 120) * 0.5)))
 
-
-def export_debug_json(payload: dict):
-    """
-    Optional JSON export for debugging only.
-    Controlled by EXPORT_JSON=1.
-    """
-    if not EXPORT_JSON:
-        return
-    try:
-        with open(EXPORT_JSON_PATH, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print("[AI] export_debug_json failed:", e)
-
-
 def reset_counter(counter: ExerciseCounter):
-    """
-    Reset counter safely without depending on specific class implementation.
-    """
     if hasattr(counter, "reset_counter") and callable(getattr(counter, "reset_counter")):
-        try:
-            counter.reset_counter()
-            return
-        except Exception:
-            pass
+        try: counter.reset_counter(); return
+        except Exception: pass
     try:
         counter.counter = 0
         counter.stage = None
         counter.angle_history.clear()
         counter.leg_stages = {'left': None, 'right': None}
-    except Exception:
-        pass
-
-def handle_destroy_window():
-    global destroy_window_requested
-    if destroy_window_requested and SHOW_CAMERA:
-        try:
-            cv2.destroyAllWindows()
-        except Exception:
-            pass
-        destroy_window_requested = False
+    except Exception: pass
 
 def main():
-    global running
-
-    # 1) Init counter + pose processor
+    global CURRENT_MODE, current_user_id, current_exercise, stop_signal_start_time
+    # 🚨 Disable the fail-safe completely so the mouse doesn't close the program if it goes to a screen corner
+    pyautogui.FAILSAFE = False
+    # 1) Load models (RTMPose + shared MediaPipe Hands)
     counter = ExerciseCounter()
     processor = RTMPoseProcessor(exercise_counter=counter, mode=MODEL_MODE)
+    
+    mp_hands = mp.solutions.hands
+    mp_draw = mp.solutions.drawing_utils
+    hands_model = mp_hands.Hands(max_num_hands=1, min_detection_confidence=0.7)
 
-    # 2) Connect to backend (socketio mode only)
+    # 2) Connect to the backend
     if RUN_MODE == "socketio":
         try:
-            sio.connect(
-                BACKEND_URL,
-                transports=["websocket"],
-                auth={"token": TOKEN},
-            )
+            sio.connect(BACKEND_URL, transports=["websocket"], auth={"token": TOKEN})
         except Exception as e:
             print("[AI] Could not connect to backend:", e)
             raise SystemExit("Backend is not running or BACKEND_URL is wrong.")
     else:
         print("[AI] Standalone mode (no backend).")
-        running = True  # start immediately in standalone
 
-    # 3) Open camera
+    # 3) Open the camera immediately at startup
     cap = cv2.VideoCapture(CAMERA_INDEX)
     if not cap.isOpened():
-        raise SystemExit("Could not open camera. Check CAMERA_INDEX or camera permissions.")
+        raise SystemExit("Could not open camera. Check CAMERA_INDEX.")
 
     last_sent_ms = 0
     last_reps_sent = -1
     last_printed_reps = -1
 
-    print(f"[AI] Ready. mode={RUN_MODE}, default_ex={EXERCISE_TYPE}, camera={CAMERA_INDEX}, show_camera={SHOW_CAMERA}")
+    print(f"[AI] System Running. Initial Mode: Navigation (Hand Mouse active)")
 
     try:
         while True:
-            if not running:
-                handle_destroy_window()  # main thread يقفل الـ window لو في طلب
-                time.sleep(0.05)
-                continue
-
-            # When a workout starts, reset counter once at the beginning
-            # (simple way: detect transition by using last_reps_sent == -1)
-            if last_reps_sent == -1:
-                reset_counter(counter)
-
             ok, frame = cap.read()
-            if not ok:
-                continue
+            if not ok: continue
 
-            # Optional resize for speed
-            frame = cv2.resize(frame, (320, 240))
+            # Flip the frame horizontally so the user feels it is a real mirror
+            frame = cv2.flip(frame, 1)
+            h, w, c = frame.shape
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-            exercise = current_exercise or EXERCISE_TYPE
+            # ========================================================
+            # Mode [0]: browsing mode with Hand Mouse active
+            # ========================================================
+            if CURRENT_MODE == 0:
+                hand_results = hands_model.process(rgb_frame)
+                if hand_results.multi_hand_landmarks:
+                    for hand_landmarks in hand_results.multi_hand_landmarks:
+                        if SHOW_CAMERA:
+                            mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+                        
+                        # 1. Fetch finger points (stable MediaPipe version)
+                        thumb_finger = hand_landmarks.landmark[4]   # thumb
+                        index_finger = hand_landmarks.landmark[8]   # index (for move/click)
+                        middle_finger = hand_landmarks.landmark[12] # middle (for scroll)
+                        
+                        # 2. Compute actual mouse movement (based on the index finger)
+                        x_mouse = int((index_finger.x * w - frame_reduction) * screen_width / (w - 2 * frame_reduction))
+                        y_mouse = int((index_finger.y * h - frame_reduction) * screen_height / (h - 2 * frame_reduction))
+                        
+                        # Protect the deadly corner boundaries
+                        x_mouse = max(10, min(screen_width - 10, x_mouse))
+                        y_mouse = max(10, min(screen_height - 10, y_mouse))
+                        
+                        # 3. Calculate distances between fingers in pixels
+                        # Click distance: thumb + index
+                        click_dist = math.hypot(int(thumb_finger.x*w) - int(index_finger.x*w), int(thumb_finger.y*h) - int(index_finger.y*h))
+                        
+                        # Scroll distance: thumb + middle
+                        scroll_dist = math.hypot(int(thumb_finger.x*w) - int(middle_finger.x*w), int(thumb_finger.y*h) - int(middle_finger.y*h))
+                        
+                        # 4. Execute actions based on gestures
+                        
+                        # 🚨 [First action]: Scroll (thumb + middle)
+                        if scroll_dist < 30:
+                            # To decide whether to scroll up or down, compare finger position with the vertical center of the screen (h / 2)
+                            # Or simpler: if the finger is in the upper half, scroll up; if in the lower half, scroll down
+                            if int(middle_finger.y * h) < (h / 2):
+                                pyautogui.scroll(150) # Scroll up
+                                print("[AI Gesture] Scrolling UP ⬆️")
+                            else:
+                                pyautogui.scroll(-150) # Scroll down
+                                print("[AI Gesture] Scrolling DOWN ⬇️")
+                                
+                            pyautogui.sleep(0.1) # Small delay so scrolling is not too fast or jumpy
+                        
+                        # 👆 [Second action]: Normal click (thumb + index)
+                        elif click_dist < 30:
+                            pyautogui.click()
+                            print("[AI Gesture] Mouse Click Executed!")
+                            pyautogui.sleep(0.4)
+                            
+                        # 🖱️ [Normal state]: move the cursor when there is no click or scroll
+                        else:
+                            pyautogui.moveTo(x_mouse, y_mouse, _pause=False)
 
-            # Process pose
-            # Returns: (annotated_frame?, angle, stage?, keypoints)
-            _img, angle, _unused, _keypoints = processor.process_frame(frame, exercise)
+                if SHOW_CAMERA:
+                    cv2.putText(frame, "Mode: Navigation (Mouse + Scroll)", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+                    cv2.imshow("AI Debug Camera", frame)
+    
+            # ========================================================
+            # Mode [1]: workout mode with RTMPose active (mouse fully disabled)
+            # ========================================================
+            elif CURRENT_MODE == 1:
+                if last_reps_sent == -1:
+                    reset_counter(counter)
+                    # 🚨 1. Record workout start time in milliseconds to prevent immediate cancel
+                    workout_start_telemetry = time.time() 
 
-            reps = int(getattr(counter, "counter", 0))
-            stage = getattr(counter, "stage", None) or "unknown"
+                # Run exercise processing with the current RTMPose model for this project
+                _img, angle, _unused, keypoints = processor.process_frame(frame, current_exercise)
 
-            # ===== optional debug window =====
-            if SHOW_CAMERA:
-                cv2.putText(frame, f"EX: {exercise}", (10, 25),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-                cv2.putText(frame, f"Reps: {reps}", (10, 55),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                cv2.putText(frame, f"Stage: {stage}", (10, 85),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                reps = int(getattr(counter, "counter", 0))
+                stage = getattr(counter, "stage", None) or "unknown"
 
-                cv2.imshow("AI Debug Camera", frame)
-                # Press 'q' to stop current workout (does not exit program)
-                if cv2.waitKey(1) & 0xFF == ord("q"):
-                    running = False
-                    # reset for next session
-                    last_reps_sent = -1
-                    continue
-
-            now_ms = int(time.time() * 1000)
-
-            should_send = (reps != last_reps_sent) or (now_ms - last_sent_ms >= SEND_EVERY_MS)
-
-            if running and current_user_id and should_send:
-                last_sent_ms = now_ms
-                last_reps_sent = reps
-
-                payload = {
-                    "userId": current_user_id,
-                    "exerciseType": current_exercise,
-                    "reps": reps,
-                    "stage": stage,
-                    "angle": float(angle) if angle is not None else 0,
-                    "formScore": safe_form_score(angle),
-                    "mistakes": [],
-                    "ts": now_ms,
-                }
-
-                # Optional local debug export
-                export_debug_json(payload)
-
-                if RUN_MODE == "socketio" and sio.connected:
+                # 🚨 2. Cooldown protection: if at least 5 seconds have passed since start, allow cancel detection
+                time_elapsed_since_start = time.time() - workout_start_telemetry
+                
+                if time_elapsed_since_start > 5.0: # 5 seconds grace period to stop and get ready
                     try:
-                        sio.emit("ai:progress", payload)
+                        if keypoints is not None and len(keypoints) > 10:
+                            nose_y = keypoints[0][1]
+                            left_shoulder_x = keypoints[5][0]
+                            right_shoulder_x = keypoints[6][0]
+                            left_wrist_y = keypoints[9][1]
+                            right_wrist_y = keypoints[10][1]
+                            
+                            shoulder_width = abs(left_shoulder_x - right_shoulder_x)
+                            
+                            # Proximity and hand raise conditions
+                            is_close = shoulder_width > 150
+                            hand_raised = (left_wrist_y < nose_y) or (right_wrist_y < nose_y)
+                            
+                            if is_close and hand_raised:
+                                if stop_signal_start_time is None:
+                                    stop_signal_start_time = time.time()
+                                else:
+                                    # The timer will only trigger if the signal holds for a full 3 seconds after the grace period
+                                    if time.time() - stop_signal_start_time > 3.0:
+                                        print("🚨 [AI Smart Stop] Cancel Triggered Successfully!")
+                                        if RUN_MODE == "socketio" and sio.connected:
+                                            sio.emit("workout:cancel", {"userId": current_user_id})
+                                            
+                                        CURRENT_MODE = 0
+                                        last_reps_sent = -1
+                                        stop_signal_start_time = None
+                                        pyautogui.sleep(1.5)
+                                        continue
+                            else:
+                                stop_signal_start_time = None
+                        else:
+                            stop_signal_start_time = None
                     except Exception as e:
-                        print("[AI] emit failed:", e)
+                        print("[AI Debug] Stop detection error:", e)
+                        stop_signal_start_time = None
                 else:
-                    # standalone: print on rep change
-                    if reps != last_printed_reps:
-                        last_printed_reps = reps
-                        print(f"[AI] {exercise}: reps={reps}, stage={stage}, score={payload['formScore']}")
+                        # During the first 5 seconds, the timer is ignored and cannot trigger
+                                        
+                # Send reps data to the backend via socket
+                now_ms = int(time.time() * 1000)
+                should_send = (reps != last_reps_sent) or (now_ms - last_sent_ms >= SEND_EVERY_MS)
 
-            # If workout stopped by backend, reset session markers
-            if not running:
-                last_reps_sent = -1
-                handle_destroy_window()
+                if current_user_id and should_send:
+                    last_sent_ms = now_ms
+                    last_reps_sent = reps
+
+                    payload = {
+                        "userId": current_user_id,
+                        "exerciseType": current_exercise,
+                        "reps": reps,
+                        "stage": stage,
+                        "angle": float(angle) if (angle is not None and not math.isnan(angle)) else 0,                        "formScore": safe_form_score(angle),
+                        "mistakes": [],
+                        "ts": now_ms,
+                    }
+
+                    if RUN_MODE == "socketio" and sio.connected:
+                        try: sio.emit("ai:progress", payload)
+                        except Exception as e: print("[AI] emit progress failed:", e)
+                    else:
+                        if reps != last_printed_reps:
+                            last_printed_reps = reps
+                            print(f"[AI] {current_exercise}: reps={reps}, stage={stage}")
+
+                if SHOW_CAMERA:
+                    cv2.putText(frame, f"Workout: {current_exercise}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                    cv2.putText(frame, f"Reps: {reps} | Stage: {stage}", (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                    cv2.imshow("AI Debug Camera", frame)
+
+            # Press Q to exit the while loop completely
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                break
 
     except KeyboardInterrupt:
         print("\n[AI] Stopping...")
     finally:
-        if SHOW_CAMERA:
-            try:
-                cv2.destroyAllWindows()
-            except Exception:
-                pass
-
-        try:
-            cap.release()
-        except Exception:
-            pass
-
+        try: cap.release()
+        except Exception: pass
+        try: cv2.destroyAllWindows()
+        except Exception: pass
         if RUN_MODE == "socketio":
-            try:
-                sio.disconnect()
-            except Exception:
-                pass
+            try: sio.disconnect()
+            except Exception: pass
 
 if __name__ == "__main__":
     main()
