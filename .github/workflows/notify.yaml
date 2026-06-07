@@ -1,4 +1,7 @@
 on:
+    push:
+        tags: ["**"]
+        branches: ["main"]
     workflow_call:
 
 jobs:

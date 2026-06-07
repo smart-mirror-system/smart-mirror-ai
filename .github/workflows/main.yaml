@@ -1,7 +1,10 @@
 on:
   push:
     branches: ["main"]
-  workflow_dispatch: 
+    tags: ["**"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
 
 jobs:
   lint:
@@ -19,9 +22,4 @@ jobs:
     needs: codeql-security-analysis
     name: Docker
     uses: ./.github/workflows/docker.yaml
-    secrets: inherit
-
-  notify_team:
-    needs: docker
-    uses: ./.github/workflows/notify.yaml
     secrets: inherit
