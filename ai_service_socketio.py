@@ -72,6 +72,9 @@ stop_signal_start_time = None
 frame_reduction = 80
 screen_width, screen_height = pyautogui.size()
 
+# Exercise processor (RTMPose + counter) initialized later in main() after the Socket.IO connection is established, so we can send the mapping immediately on connect
+processor = None
+
 @sio.event
 def connect():
     print(f"[AI] Connected to backend: {BACKEND_URL} (id_hint={ID_HINT})")
@@ -83,6 +86,14 @@ def connect_error(data):
 @sio.event
 def disconnect():
     print("[AI] Disconnected")
+
+def connect():
+    global processor # We need to access the processor instance to send the mapping right after connecting
+    print("Connected to server!")
+    if processor:
+        mapping = processor.get_keypoint_mapping()
+        sio.emit("ai:mapping", mapping)
+        print("Sent keypoint mapping to server.")
 
 # Backend can also change the mode if an admin uses the control panel without the screen
 @sio.on("workout:start")
@@ -119,7 +130,7 @@ def reset_counter(counter: ExerciseCounter):
     except Exception: pass
 
 def main():
-    global CURRENT_MODE, current_user_id, current_exercise, stop_signal_start_time
+    global CURRENT_MODE, current_user_id, current_exercise, stop_signal_start_time, processor
     # 🚨 Disable the fail-safe completely so the mouse doesn't close the program if it goes to a screen corner
     pyautogui.FAILSAFE = False
     # 1) Load models (RTMPose + shared MediaPipe Hands)
@@ -226,40 +237,41 @@ def main():
             elif CURRENT_MODE == 1:
                 if last_reps_sent == -1:
                     reset_counter(counter)
-                    # 🚨 1. Record workout start time in milliseconds to prevent immediate cancel
-                    workout_start_telemetry = time.time() 
+                    # Protection: Record workout start time to prevent immediate locking and freezing during the first 5 seconds.
+                    workout_start_telemetry = time.time()
 
-                # Run exercise processing with the current RTMPose model for this project
                 _img, angle, _unused, keypoints = processor.process_frame(frame, current_exercise)
 
                 reps = int(getattr(counter, "counter", 0))
                 stage = getattr(counter, "stage", None) or "unknown"
 
-                # 🚨 2. Cooldown protection: if at least 5 seconds have passed since start, allow cancel detection
+                # Period of allowance 5 seconds: in the first exercise it is impossible to lock so that you can catch up, return and prepare the camera
                 time_elapsed_since_start = time.time() - workout_start_telemetry
                 
-                if time_elapsed_since_start > 5.0: # 5 seconds grace period to stop and get ready
+                if time_elapsed_since_start > 5.0:
                     try:
                         if keypoints is not None and len(keypoints) > 10:
+                            # Fetch keypoint coordinates using RTMPose COCO format
                             nose_y = keypoints[0][1]
                             left_shoulder_x = keypoints[5][0]
                             right_shoulder_x = keypoints[6][0]
                             left_wrist_y = keypoints[9][1]
                             right_wrist_y = keypoints[10][1]
                             
+                            # Calculate shoulder width to determine proximity to the camera
                             shoulder_width = abs(left_shoulder_x - right_shoulder_x)
                             
-                            # Proximity and hand raise conditions
-                            is_close = shoulder_width > 150
+                            # Strict conditions: proximity to the camera + hand raised above nose level 🖐️
+                            is_close = shoulder_width > 150  # This value should be adjusted based on camera size and room dimensions
                             hand_raised = (left_wrist_y < nose_y) or (right_wrist_y < nose_y)
                             
                             if is_close and hand_raised:
                                 if stop_signal_start_time is None:
                                     stop_signal_start_time = time.time()
                                 else:
-                                    # The timer will only trigger if the signal holds for a full 3 seconds after the grace period
+                                    # ⏱️ Full Safety Check: Must stay close with hands raised for 3 full seconds
                                     if time.time() - stop_signal_start_time > 3.0:
-                                        print("🚨 [AI Smart Stop] Cancel Triggered Successfully!")
+                                        print("🚨 [AI Smart Stop] Cancel Triggered Successfully after 3 seconds of stability!")
                                         if RUN_MODE == "socketio" and sio.connected:
                                             sio.emit("workout:cancel", {"userId": current_user_id})
                                             
@@ -269,6 +281,7 @@ def main():
                                         pyautogui.sleep(1.5)
                                         continue
                             else:
+                                # If hands are lowered or user moves away before 3 seconds, reset the timer immediately
                                 stop_signal_start_time = None
                         else:
                             stop_signal_start_time = None
@@ -276,7 +289,7 @@ def main():
                         print("[AI Debug] Stop detection error:", e)
                         stop_signal_start_time = None
                 else:
-                    # During the first 5 seconds, the timer is ignored and cannot trigger
+                    # While we are in the first 5 seconds, the timer is reset and cannot be triggered
                     stop_signal_start_time = None
                 
                 # Send reps data to the backend via socket
@@ -295,10 +308,12 @@ def main():
                         "angle": float(angle) if (angle is not None and not math.isnan(angle)) else 0,                        "formScore": safe_form_score(angle),
                         "mistakes": [],
                         "ts": now_ms,
+                        "skeleton": keypoints.tolist() if keypoints is not None else [],
                     }
 
                     if RUN_MODE == "socketio" and sio.connected:
-                        try: sio.emit("ai:progress", payload)
+                        try: 
+                            sio.emit("ai:progress", payload)
                         except Exception as e: print("[AI] emit progress failed:", e)
                     else:
                         if reps != last_printed_reps:
