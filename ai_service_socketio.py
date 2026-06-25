@@ -79,6 +79,7 @@ def main():
         BACKEND_URL,
         transports=["websocket"],
         auth={"token": AI_JWT},
+        socketio_path="api/socket.io",
     )
 
     # 3) Open camera (headless - no cv2.imshow
