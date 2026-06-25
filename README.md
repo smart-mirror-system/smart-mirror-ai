@@ -37,6 +37,17 @@ This folder contains the AI-related services and scripts for the Smart Mirror pr
 
 - Place your ONNX models in the `../models/` directory.
 
+## Socket.IO Events
+
+The AI service listens for the following events from the backend:
+
+| Direction       | Event         | Description                                       |
+| :-------------- | :------------ | :------------------------------------------------ |
+| Server → Client | `ai:pause`    | Release the camera for face recognition.          |
+| Server → Client | `ai:resume`   | Re-acquire the camera after face recognition.     |
+
+The service emits workout progress data to the backend via `ai:progress`.
+
 ## Environment Variables
 
 - See `.env.example` for required environment variables.

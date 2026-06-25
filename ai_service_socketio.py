@@ -34,6 +34,12 @@ if not USER_ID:
     raise SystemExit("JWT payload does not contain userId/id/_id.")
 
 # =========================
+# Pause/resume state for camera sharing with face recognition
+# =========================
+paused = False
+
+
+# =========================
 # Socket.IO client
 # =========================
 sio = socketio.Client(
@@ -58,6 +64,18 @@ def connect_error(data):
 @sio.event
 def disconnect():
     print("[AI] Disconnected")
+
+@sio.on("ai:pause")
+def on_ai_pause():
+    global paused
+    paused = True
+    print("[AI] Paused — camera released for face recognition")
+
+@sio.on("ai:resume")
+def on_ai_resume():
+    global paused
+    paused = False
+    print("[AI] Resumed — camera re-acquired")
 
 def safe_form_score(angle):
     """
@@ -84,6 +102,7 @@ def main():
 
     # 3) Open camera (headless - no cv2.imshow
     cap = cv2.VideoCapture(CAMERA_INDEX)
+    is_paused = lambda: paused
 
     if not cap.isOpened():
         raise SystemExit("Could not open camera. Check CAMERA_INDEX or camera permissions.")
@@ -93,6 +112,20 @@ def main():
     print(f"[AI] Running headless. exercise={EXERCISE_TYPE}, camera={CAMERA_INDEX}")
     try:
         while True:
+            if is_paused():
+                if cap and cap.isOpened():
+                    cap.release()
+                    cap = None
+                time.sleep(0.2)
+                continue
+
+            if cap is None or not cap.isOpened():
+                cap = cv2.VideoCapture(CAMERA_INDEX)
+                if not cap.isOpened():
+                    print("[AI] Waiting for camera...")
+                    time.sleep(0.5)
+                    continue
+
             ok, frame = cap.read()
             if not ok:
                 continue
@@ -156,7 +189,8 @@ def main():
     finally:
         if SHOW_CAMERA:
             cv2.destroyAllWindows()
-        cap.release()
+        if cap and cap.isOpened():
+            cap.release()
         try:
             sio.disconnect()
         except Exception:
