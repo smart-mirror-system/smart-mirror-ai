@@ -25,6 +25,11 @@ TOKEN = os.getenv("DEVICE_TOKEN", "").strip()
 if not TOKEN:
     raise SystemExit("Missing DEVICE_TOKEN (device JWT).")
 
+# =========================
+# Pause/resume state for camera sharing with face recognition
+# =========================
+paused = False
+
 EXERCISE_TYPE = os.getenv("EXERCISE_TYPE", "pushup").strip()
 CAMERA_INDEX = int(os.getenv("CAMERA_INDEX", "0"))
 SEND_EVERY_MS = int(os.getenv("SEND_EVERY_MS", "250"))
@@ -87,6 +92,18 @@ def connect_error(data):
 def disconnect():
     print("[AI] Disconnected")
 
+@sio.on("ai:pause")
+def on_ai_pause():
+    global paused
+    paused = True
+    print("[AI] Paused — camera released for face recognition")
+
+@sio.on("ai:resume")
+def on_ai_resume():
+    global paused
+    paused = False
+    print("[AI] Resumed — camera re-acquired")
+
 def connect():
     global processor # We need to access the processor instance to send the mapping right after connecting
     print("Connected to server!")
@@ -144,7 +161,7 @@ def main():
     # 2) Connect to the backend
     if RUN_MODE == "socketio":
         try:
-            sio.connect(BACKEND_URL, transports=["websocket"], auth={"token": TOKEN})
+            sio.connect(BACKEND_URL, transports=["websocket"], auth={"token": TOKEN}, socketio_path="api/socket.io",)
         except Exception as e:
             print("[AI] Could not connect to backend:", e)
             raise SystemExit("Backend is not running or BACKEND_URL is wrong.")
@@ -155,6 +172,8 @@ def main():
     cap = cv2.VideoCapture(CAMERA_INDEX)
     if not cap.isOpened():
         raise SystemExit("Could not open camera. Check CAMERA_INDEX.")
+    
+    is_paused = lambda: paused
 
     last_sent_ms = 0
     last_reps_sent = -1
@@ -164,6 +183,21 @@ def main():
 
     try:
         while True:
+
+            if is_paused():
+                if cap and cap.isOpened():
+                    cap.release()
+                    cap = None
+                time.sleep(0.2)
+                continue
+
+            if cap is None or not cap.isOpened():
+                cap = cv2.VideoCapture(CAMERA_INDEX)
+                if not cap.isOpened():
+                    print("[AI] Waiting for camera...")
+                    time.sleep(0.5)
+                    continue
+
             ok, frame = cap.read()
             if not ok: continue
 
@@ -336,6 +370,10 @@ def main():
         except Exception: pass
         try: cv2.destroyAllWindows()
         except Exception: pass
+
+        if cap and cap.isOpened():
+            cap.release()
+        
         if RUN_MODE == "socketio":
             try: sio.disconnect()
             except Exception: pass

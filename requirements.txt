@@ -5,3 +5,5 @@ onnxruntime
 python-socketio[client]
 PyJWT
 python-dotenv
+pyautogui
+mediapipe==0.10.9
